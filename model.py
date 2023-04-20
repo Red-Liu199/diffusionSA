@@ -96,11 +96,13 @@ class LinearAttentionTransformerModel(nn.Module):
 
 
 class diffusion_SA(object):
-    def __init__(self, imnoise_func: Callable, denoise_func: nn.Module, timesteps: int, beta_schedule: Callable) -> None:
+    def __init__(self, imnoise_func: Callable, denoise_func: nn.Module, timesteps: int, beta_schedule: Callable, use_cache: bool, dataset) -> None:
         self.imnoise_func = imnoise_func
         self.denoise_func = denoise_func
         self.timesteps = timesteps
         self.betas = beta_schedule(self.timesteps)
+        self.use_cache = use_cache
+        self.dataset = dataset
     
     def proposal(self, x_0, mode:Literal['single', 'all']='all', time_idx= None):
         # x_0: a batch of data, size (B, L)
@@ -133,30 +135,58 @@ class diffusion_SA(object):
             return log_p_probs.sum(-1) 
 
 
-    def MIS(self, x_0, pv_x_series=None, pv_log_p=None, pv_log_q=None, steps=2):
-        x_series = pv_x_series
-        for i in range(steps):
-            x_proposals, log_q = self.proposal(x_0) # (T, B, L)
-            log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
-            if x_series is None: # the first step, directly accept all
-                x_series = x_proposals
-                pv_log_p = log_p
-                pv_log_q = log_q
-            else:
-                log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
-                accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
-                for b in range(x_0.size(0)):
-                    randnum = random.random()
-                    if accept_prob[b]>randnum:
-                        x_series[:, b, :] = x_proposals[:, b, :]
-                        pv_log_p[b] = log_p[b]
-                        pv_log_q[b] = log_q[b]
+    def MIS(self, x_0, steps=2, batch_ids=None):
+        if self.use_cache:
+            # x_0: (B,T+1,L)
+            for i in range(steps):
+                x_proposals, log_q = self.proposal(x_0[:, 0, :]) # (T+1, B, L)
+                log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
+                if x_0[0, 1, 0]==-1: # the first step, directly accept all
+                    x_series = x_proposals
+                    pv_log_p = log_p
+                    pv_log_q = log_q
+                    # update the sample cache
+                    self.dataset.data[batch_ids] = x_proposals
+                else:
+                    log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
+                    accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
+                    change_flag = False
+                    for b in range(x_0.size(0)):
+                        randnum = random.random()
+                        if accept_prob[b]>randnum:
+                            change_flag = True
+                            x_series[:, b, :] = x_proposals[:, b, :]
+                            pv_log_p[b] = log_p[b]
+                            pv_log_q[b] = log_q[b]
+                    if change_flag:
+                        self.dataset.data[batch_ids] = x_series
+
+        else:
+            # x_0: (B,L)
+            x_series = None
+            for i in range(steps):
+                x_proposals, log_q = self.proposal(x_0) # (T+1, B, L)
+                log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
+                if x_series is None: # the first step, directly accept all
+                    x_series = x_proposals
+                    pv_log_p = log_p
+                    pv_log_q = log_q
+                else:
+                    log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
+                    accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
+                    for b in range(x_0.size(0)):
+                        randnum = random.random()
+                        if accept_prob[b]>randnum:
+                            x_series[:, b, :] = x_proposals[:, b, :]
+                            pv_log_p[b] = log_p[b]
+                            pv_log_q[b] = log_q[b]
         return x_series, pv_log_p, pv_log_q
             
 
-    def cal_loss(self, input_data, mode='train'):
+    def cal_loss(self, input_data, mode='train', batch_ids=None):
+        MIS_steps = 1 if self.use_cache else 2
         if mode=='train':
-            x_series, _, _ = self.MIS(input_data)
+            x_series, _, _ = self.MIS(input_data, steps=MIS_steps, batch_ids=batch_ids)
             x_series = x_series.to(self.denoise_func.device)
             total_loss = 0
             for t in range(1, len(x_series)):

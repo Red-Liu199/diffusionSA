@@ -34,7 +34,8 @@ def train(local_rank:int, args):
     denosing_model = DDP(denosing_model, device_ids=[local_rank], output_device=local_rank)
     imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
-    diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule)
+    diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+        use_cache=args.use_cache, dataset=train_dataloader.dataset)
     # save config
     if local_rank==0:
         cfg['others'] = vars(args)
@@ -47,14 +48,32 @@ def train(local_rank:int, args):
         print('Total sentences:{}, batch size:{}, batch num for one gpu:{}, epochs:{}, total steps:{}'.format(
             len(train_dataloader.dataset), args.batch_size, len(train_dataloader), args.epochs, total_steps))
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps)
+    
+    # init_eval
+    if args.init_eval and local_rank==0:
+        denosing_model.eval()
+        st = time.time()
+        with torch.no_grad():
+            eval_loss = 0
+            for batch, batch_ids in tqdm(dev_dataloader):
+                loss = diffusinSA.cal_loss(batch, mode='test', batch_ids=batch_ids)
+                eval_loss += loss
+        if local_rank==0:
+            print('Init_eval_loss:', eval_loss)
+        total_time = (time.time()-st)/60
+        print('Init eval time:{:.2f}, dev loss:{:.3f}'.format(total_time, eval_loss))
+        checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', 'checkpoint_init.pt')
+        # if resuming is needed, then optimizer and scheduler must be saved too
+        torch.save(denosing_model.state_dict(), checkpoint_path)
+
     # training
     step = 0
     for epoch in range(args.epochs):
         training_loss = 0
         denosing_model.train()
         st = time.time()
-        for batch in tqdm(train_dataloader):
-            loss = diffusinSA.cal_loss(batch, mode='train') # backward
+        for batch, batch_ids in tqdm(train_dataloader):
+            loss = diffusinSA.cal_loss(batch, mode='train', batch_ids=batch_ids) # backward
             # loss = diffusinSA.cal_loss(batch)
             # loss.backward()
             optimizer.step()
@@ -66,15 +85,15 @@ def train(local_rank:int, args):
                 tb_writer.add_scalar('train_loss', loss, step)
             training_loss += loss
         total_time = (time.time()-st)/60
-        print('Epoch:{}, train time:{:.2f}, training loss:{:.3f}'.format(epoch, total_time, training_loss))
         # validation
         if local_rank==0:
+            print('Epoch:{}, train time:{:.2f} min, training loss:{:.3f}'.format(epoch, total_time, training_loss))
             denosing_model.eval()
             st = time.time()
             with torch.no_grad():
                 eval_loss = 0
-                for batch in dev_dataloader:
-                    loss = diffusinSA.cal_loss(batch, mode='test')
+                for batch, batch_ids in tqdm(dev_dataloader):
+                    loss = diffusinSA.cal_loss(batch, mode='test', batch_ids=batch_ids)
                     eval_loss += loss
             if local_rank==0:
                 tb_writer.add_scalar('eval_loss', eval_loss, epoch)
@@ -82,7 +101,7 @@ def train(local_rank:int, args):
             print('Epoch:{}, eval time:{:.2f}, dev loss:{:.3f}'.format(epoch, total_time, eval_loss))
             checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', f'checkpoint_{epoch}.pt')
             # if resuming is needed, then optimizer and scheduler must be saved too
-            torch.save(checkpoint_path, denosing_model.state_dict())
+            torch.save(denosing_model.state_dict(), checkpoint_path)
             
         
 if __name__=='__main__':
@@ -101,6 +120,7 @@ if __name__=='__main__':
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--init_eval', type=bool, default=False)
     # diffusion SA
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
