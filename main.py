@@ -17,13 +17,15 @@ from tqdm import tqdm
 def train(local_rank:int, args):
     dist_url='tcp://localhost:13457'
     dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
-    # assign log writer
+    # assign log writer and checkpoint dir
     if local_rank==0:
         log_path = os.path.join(args.exp_dir, 'log')
         if os.path.exists(log_path):
             shutil.rmtree(log_path)
         os.mkdir(log_path)
         tb_writer = SummaryWriter(log_dir=log_path)
+    if not os.path.exists(os.path.join(args.exp_dir, 'checkpoint')):
+        os.mkdir(os.path.join(args.exp_dir, 'checkpoint'))
     # load data
     train_dataloader, dev_dataloader, test_dataloader = get_dataloader(args)
     # initialize model
@@ -51,13 +53,18 @@ def train(local_rank:int, args):
     
     # init_eval
     if args.init_eval and local_rank==0:
+        print('****Init Evaluation****')
         denosing_model.eval()
         st = time.time()
+        count=0
         with torch.no_grad():
             eval_loss = 0
             for batch, batch_ids in tqdm(dev_dataloader):
                 loss = diffusinSA.cal_loss(batch, mode='test', batch_ids=batch_ids)
                 eval_loss += loss
+                count +=1
+                if count>=10:
+                    break
         if local_rank==0:
             print('Init_eval_loss:', eval_loss)
         total_time = (time.time()-st)/60
@@ -125,7 +132,7 @@ if __name__=='__main__':
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
     parser.add_argument('--beta_schedule', type=str, default='linear')
-    parser.add_argument('--use_cache', type=bool, default=True)
+    parser.add_argument('--use_cache', type=bool, default=False)
     args = parser.parse_args()
     if args.cfg_path is None:
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
