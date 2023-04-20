@@ -1,0 +1,35 @@
+{
+  "model": {
+    "input_dim": 27,
+    "output_dim": 27,
+    "dim": 512,
+    "heads": 8,
+    "depth": 12,
+    "n_blocks": 1,
+    "max_seq_len": 256,
+    "causal": false,
+    "num_timesteps": 50,
+    "ff_dropout": 0,
+    "attn_layer_dropout": 0,
+    "n_local_attn_heads": 4,
+    "local_attn_window_size": 128
+  },
+  "others": {
+    "exp_dir": "exp/test",
+    "cfg_path": "exp/test/config.json",
+    "dataset": "text8",
+    "num_workers": 4,
+    "seq_len": 256,
+    "seed": 0,
+    "optimizer": "adam",
+    "lr": 0.0001,
+    "warmup_ratio": 0.15,
+    "epochs": 10,
+    "ngpu": 1,
+    "batch_size": 128,
+    "imnoise_method": "multinomial",
+    "timesteps": 5,
+    "beta_schedule": "linear",
+    "use_cache": true
+  }
+}
