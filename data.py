@@ -111,9 +111,9 @@ def get_dataloader(args):
         valid = Text8Dataset(seq_len=args.seq_len, split='valid')
         test = Text8Dataset(seq_len=args.seq_len, split='test')
         sampler = torch.utils.data.distributed.DistributedSampler(train)
-        train_loader = DataLoader(train, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler)
-        valid_loader = DataLoader(valid, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        test_loader = DataLoader(test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        train_loader = DataLoader(train, batch_size=args.batch_size//args.ngpu, num_workers=args.num_workers, sampler=sampler)
+        valid_loader = DataLoader(valid, batch_size=args.batch_size//args.ngpu, shuffle=False, num_workers=args.num_workers)
+        test_loader = DataLoader(test, batch_size=args.batch_size//args.ngpu, shuffle=False, num_workers=args.num_workers)
     else:
         pass
     return train_loader, valid_loader, test_loader

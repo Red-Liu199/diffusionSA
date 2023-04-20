@@ -43,8 +43,9 @@ def train(local_rank:int, args):
     if args.optimizer=='adam':
         optimizer = optim.Adam(denosing_model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     total_steps = args.epochs*len(train_dataloader.dataset)//args.batch_size
-    print('Total sentences:{}, batch size:{}, batch num for one gpu:{}, epochs:{}, total steps:{}'.format(
-        len(train_dataloader.dataset), args.batch_size, len(train_dataloader), args.epochs, total_steps))
+    if local_rank==0:
+        print('Total sentences:{}, batch size:{}, batch num for one gpu:{}, epochs:{}, total steps:{}'.format(
+            len(train_dataloader.dataset), args.batch_size, len(train_dataloader), args.epochs, total_steps))
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps)
     # training
     step = 0
@@ -60,8 +61,9 @@ def train(local_rank:int, args):
             optimizer.zero_grad()
             scheduler.step()
             step += 1
-            tb_writer.add_scalar('lr', optimizer.param_groups[0]['lr'], step)
-            tb_writer.add_scalar('train_loss', loss, step)
+            if local_rank==0:
+                tb_writer.add_scalar('lr', optimizer.param_groups[0]['lr'], step)
+                tb_writer.add_scalar('train_loss', loss, step)
             training_loss += loss
         total_time = (time.time()-st)/60
         print('Epoch:{}, train time:{:.2f}, training loss:{:.3f}'.format(epoch, total_time, training_loss))
@@ -74,7 +76,8 @@ def train(local_rank:int, args):
                 for batch in dev_dataloader:
                     loss = diffusinSA.cal_loss(batch, mode='test')
                     eval_loss += loss
-            tb_writer.add_scalar('eval_loss', eval_loss, epoch)
+            if local_rank==0:
+                tb_writer.add_scalar('eval_loss', eval_loss, epoch)
             total_time = (time.time()-st)/60
             print('Epoch:{}, eval time:{:.2f}, dev loss:{:.3f}'.format(epoch, total_time, eval_loss))
             checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', f'checkpoint_{epoch}.pt')
