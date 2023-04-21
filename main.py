@@ -20,6 +20,8 @@ def train(local_rank:int, args):
     dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
     # assign log writer and checkpoint dir
     if local_rank==0:
+        if not os.path.exists(args.exp_dir):
+            os.mkdir(args.exp_dir)
         log_path = os.path.join(args.exp_dir, 'log')
         if os.path.exists(log_path):
             shutil.rmtree(log_path)
@@ -62,7 +64,7 @@ def train(local_rank:int, args):
             total_tokens = 0
             total_log_probs = 0
             for batch, batch_ids in tqdm(dev_dataloader):
-                log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 count += 1
@@ -72,6 +74,8 @@ def train(local_rank:int, args):
         bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
         print('Init eval time:{:.2f}, dev tokens:{}, dev bpc:{:.3f}'.format(total_time, total_tokens, bpc))
+        checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', 'checkpoint_init.pt')
+        save_checkpoint(checkpoint_path, denosing_model, optimizer, scheduler)
 
     # training
     step = 0
@@ -80,7 +84,7 @@ def train(local_rank:int, args):
         denosing_model.train()
         st = time.time()
         for batch, batch_ids in tqdm(train_dataloader):
-            loss = diffusinSA.cal_loss(batch, mode='train', batch_ids=batch_ids) # backward
+            loss, accept_rate = diffusinSA.cal_loss(batch, mode='train', batch_ids=batch_ids) # backward
             # loss = diffusinSA.cal_loss(batch)
             # loss.backward()
             optimizer.step()
@@ -90,6 +94,7 @@ def train(local_rank:int, args):
             if local_rank==0:
                 tb_writer.add_scalar('lr', optimizer.param_groups[0]['lr'], step)
                 tb_writer.add_scalar('train_loss', loss, step)
+                tb_writer.add_scalar('training_accept_rate', accept_rate, step)
             training_loss += loss
         total_time = (time.time()-st)/60
         # validation
@@ -101,7 +106,7 @@ def train(local_rank:int, args):
                 total_tokens = 0
                 total_log_probs = 0
                 for batch, batch_ids in tqdm(dev_dataloader):
-                    log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                    log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
                     total_tokens += torch.numel(batch)
                     total_log_probs += log_probs*batch.size(0)
             avg_log_prob = total_log_probs/total_tokens
@@ -110,8 +115,7 @@ def train(local_rank:int, args):
             total_time = (time.time()-st)/60
             print('Epoch:{}, eval time:{:.2f}, dev tokens:{}, dev bpc:{:.3f}'.format(epoch, total_time, total_tokens, bpc))
             checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', f'checkpoint_{epoch}.pt')
-            # if resuming is needed, then optimizer and scheduler must be saved too
-            torch.save(denosing_model.state_dict(), checkpoint_path)
+            save_checkpoint(checkpoint_path, denosing_model, optimizer, scheduler)
             
 def test(local_rank:int, args):
     dist_url='tcp://localhost:13457'
@@ -126,8 +130,14 @@ def test(local_rank:int, args):
     denosing_model = DDP(denosing_model, device_ids=[local_rank], output_device=local_rank)
     # load checkpoint
     checkpoint = torch.load(args.checkpoint)
-    denosing_model.load_state_dict(checkpoint)
-
+    denosing_model.load_state_dict(checkpoint['model'])
+    # for storing samples
+    store_batch_num = 1
+    store_sample_path = args.checkpoint[:-3]+'.json'
+    samples = {
+        'proposals':[],
+        'predictions':[]
+    }
     imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
     diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
@@ -139,19 +149,25 @@ def test(local_rank:int, args):
         with torch.no_grad():
             total_tokens = 0
             total_log_probs = 0
-            for batch, batch_ids in tqdm(dev_dataloader):
-                log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+            batch_num = 0
+            for batch, _ in tqdm(dev_dataloader):
+                log_probs, x_series_proposed, x_series_pred = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
+                if batch_num<store_batch_num:
+                    samples['proposals'].append(x_series_proposed.cpu().numpy())
+                    samples['predictions'].append(x_series_pred.cpu().numpy())
+                    batch_num +=1
         avg_log_prob = total_log_probs/total_tokens
         bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
         print('Eval time:{:.2f}, test tokens:{}, test bpc:{:.3f}'.format(total_time, total_tokens, bpc))
+        json.dump(samples, open(store_sample_path, 'w'), indent=2)
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_dir', type=str)
-    parser.add_argument('--cfg_path', type=str, default="exp/test/config.json", help='config file path')
+    parser.add_argument('--cfg_path', type=str, default="model_config.json", help='config file path')
     # dataset
     parser.add_argument('--dataset', type=str, default='text8')
     parser.add_argument('--num_workers', type=int, default=4)
@@ -179,6 +195,6 @@ if __name__=='__main__':
         assert os.path.exists(args.cfg_path), "No model configuration file specified"
     set_seeds(args.seed)
     if args.test:
-        mp.spawn(test, nprocs=args.ngpu, args=(args,))
+        mp.spawn(test, nprocs=1, args=(args,))
     else:
-        mp.spawn(train, nprocs=1, args=(args,))
+        mp.spawn(train, nprocs=args.ngpu, args=(args,))

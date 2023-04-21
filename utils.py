@@ -18,6 +18,20 @@ def set_seeds(seed, cuda_deterministic=False):
                 torch.backends.cudnn.deterministic = True
                 torch.backends.cudnn.benchmark = False
 
+def save_checkpoint(path, model, optimizer, scheduler):
+    checkpoint = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict()
+        }
+    torch.save(checkpoint, path)
+
+def load_checkpoint(path, model, optimizer, scheduler):
+    checkpoint = torch.load(path)
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    scheduler.load_state_dict(checkpoint['scheduler'])
+
 class Vocab():
     
     def __init__(self, stoi={}):
