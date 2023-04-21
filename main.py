@@ -113,11 +113,45 @@ def train(local_rank:int, args):
             # if resuming is needed, then optimizer and scheduler must be saved too
             torch.save(denosing_model.state_dict(), checkpoint_path)
             
-        
+def test(local_rank:int, args):
+    dist_url='tcp://localhost:13457'
+    dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
+    # load data
+    train_dataloader, dev_dataloader, test_dataloader = get_dataloader(args)
+    # initialize model
+    cfg = json.load(open(args.cfg_path, 'r'))
+    model_cfg = cfg['model']
+    denosing_model = LinearAttentionTransformerModel(**model_cfg)
+    denosing_model.to(f'cuda:{local_rank}')
+    denosing_model = DDP(denosing_model, device_ids=[local_rank], output_device=local_rank)
+    # load checkpoint
+    checkpoint = torch.load(args.checkpoint)
+    denosing_model.load_state_dict(checkpoint)
+
+    imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
+    beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
+    diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+        use_cache=args.use_cache, dataset=train_dataloader.dataset)
+    # validation
+    if local_rank==0:
+        denosing_model.eval()
+        st = time.time()
+        with torch.no_grad():
+            total_tokens = 0
+            total_log_probs = 0
+            for batch, batch_ids in tqdm(dev_dataloader):
+                log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                total_tokens += torch.numel(batch)
+                total_log_probs += log_probs*batch.size(0)
+        avg_log_prob = total_log_probs/total_tokens
+        bpc = -avg_log_prob/math.log(2)
+        total_time = (time.time()-st)/60
+        print('Eval time:{:.2f}, test tokens:{}, test bpc:{:.3f}'.format(total_time, total_tokens, bpc))
+
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_dir', type=str)
-    parser.add_argument('--cfg_path', type=str, help='config file path')
+    parser.add_argument('--cfg_path', type=str, default="exp/test/config.json", help='config file path')
     # dataset
     parser.add_argument('--dataset', type=str, default='text8')
     parser.add_argument('--num_workers', type=int, default=4)
@@ -131,6 +165,9 @@ if __name__=='__main__':
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--init_eval', action="store_true")
+    # testing
+    parser.add_argument('--test', action="store_true")
+    parser.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
     # diffusion SA
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
@@ -139,6 +176,9 @@ if __name__=='__main__':
     args = parser.parse_args()
     if args.cfg_path is None:
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
-        assert os.path.exists(args.cfg_path), "No configuration file specified"
+        assert os.path.exists(args.cfg_path), "No model configuration file specified"
     set_seeds(args.seed)
-    mp.spawn(train, nprocs=args.ngpu, args=(args,))
+    if args.test:
+        mp.spawn(test, nprocs=args.ngpu, args=(args,))
+    else:
+        mp.spawn(train, nprocs=1, args=(args,))
