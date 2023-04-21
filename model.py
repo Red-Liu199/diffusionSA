@@ -1,3 +1,4 @@
+from distutils.log import log
 import math
 import numpy as np
 import random
@@ -103,6 +104,7 @@ class diffusion_SA(object):
         self.betas = beta_schedule(self.timesteps)
         self.use_cache = use_cache
         self.dataset = dataset
+        self.num_classes = self.denoise_func.module.num_classes
     
     def proposal(self, x_0, mode:Literal['single', 'all']='all', time_idx= None):
         # x_0: a batch of data, size (B, L)
@@ -113,7 +115,7 @@ class diffusion_SA(object):
             x_series=[x_0]
             log_q_probs = 0
             for t in range(self.timesteps):
-                log_x_prob = self.imnoise_func(x, self.betas[t], num_classes=self.denoise_func.module.num_classes) # (B, L, C)
+                log_x_prob = self.imnoise_func(x, self.betas[t], num_classes=self.num_classes) # (B, L, C)
                 x_prob = log_x_prob.exp().view(-1, log_x_prob.size(-1)) #(B*L, C)
                 x = torch.multinomial(x_prob, 1).view(log_x_prob.shape[:-1]) # (B, L)
                 x_series.append(x)
@@ -121,7 +123,27 @@ class diffusion_SA(object):
         # x_series: [(B, L), (B, L), ...] --> (T+1, B, L)
         x_series = torch.stack(x_series, dim=0)
         return x_series, log_q_probs
+    
+    def imnoising_score(self, x_series):
+        log_q_probs = 0
+        for t in range(1, len(x_series)):
+            x_t = x_series[t]
+            x_tm1 = x_series[t-1]
+            log_x_prob = self.imnoise_func(x_tm1, self.betas[t], num_classes=self.denoise_func.module.num_classes) # (B, L, C)
+            log_q_probs += log_x_prob.gather(index=x_t.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1) # (B,)
+        return log_q_probs
 
+    def log_q_x_T(self, x_T):
+        # x_T: (B, L)
+        if self.imnoise_func == imnoise_multinomial:
+            # uniform distribution for every token
+            log_probs = -np.log(self.num_classes)*torch.ones(x_T.shape)
+            log_probs = log_probs.sum(-1) # (B,)
+        elif self.imnoise_func == imnoise_bigram:
+            pass
+        return log_probs
+
+    
     def denoising_score(self, x_series):
         with torch.no_grad():
             log_p_probs = 0
@@ -131,9 +153,11 @@ class diffusion_SA(object):
                 t_batch = (t*torch.ones(x_t.size(0), device=x_t.device)).long()
                 logits = self.denoise_func(x_t, t_batch) # B, L, V
                 log_prob_pred = F.log_softmax(logits, dim=-1)
-                log_p_probs += log_prob_pred.gather(index=x_tm1.unsqueeze(-1), dim=-1).squeeze(-1) # B,L
-            return log_p_probs.sum(-1) 
-
+                log_p_probs += log_prob_pred.gather(index=x_tm1.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1) # B,L
+            # we assume that logp(x_T)=logq(x_T|x_0)
+            log_p_probs += self.log_q_x_T(x_series[-1]).to(log_p_probs.device)
+            return log_p_probs
+        
 
     def MIS(self, x_0, steps=2, batch_ids=None):
         if self.use_cache:
@@ -146,8 +170,11 @@ class diffusion_SA(object):
                     pv_log_p = log_p
                     pv_log_q = log_q
                     # update the sample cache
-                    self.dataset.data[batch_ids] = x_proposals
+                    self.dataset.data[batch_ids] = x_proposals.permute(1, 0, 2).clone()
                 else:
+                    # x_0 is the previous x series
+                    pv_log_p = self.denoising_score(x_0.to(self.denoise_func.device))
+                    pv_log_q = self.imnoising_score(x_0)
                     log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
                     accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
                     change_flag = False
@@ -201,7 +228,8 @@ class diffusion_SA(object):
                 total_loss += loss.item()
             return total_loss
         else:
-            _, log_p_prob, _ = self.MIS(input_data)
-            loss = -log_p_prob.sum(-1).item()
-            return loss
+            # return log_prob(input_data)
+            x_proposals, log_q = self.proposal(input_data) # (T+1, B, L)
+            log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
+            return torch.mean(log_p.cpu() - log_q).item()
 

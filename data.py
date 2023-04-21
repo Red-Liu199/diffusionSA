@@ -85,7 +85,7 @@ class Text8Dataset(Dataset):
         data = data[:self.seq_len*(len(data)//self.seq_len)]
         data = data.reshape(-1, self.seq_len) # N, L
         if self.timesteps is not None:
-            data = data.unsuqeeze(1) # N, 1, L
+            data = data.unsqueeze(1) # N, 1, L
             cache_data = (-1*torch.ones((data.size(0), self.timesteps, data.size(2)))).long() # N, T, L
             data = torch.cat((data, cache_data), dim=1) # N, T+1, L
         # Save processed data
@@ -96,7 +96,10 @@ class Text8Dataset(Dataset):
         return os.path.join(self.root, 'text8.zip')
 
     def processed_file(self, split):
-        return os.path.join(self.root, 'processed_{}.pt'.format(split))
+        if self.timesteps is not None:
+            return os.path.join(self.root, 'processed_{}_cache.pt'.format(split))
+        else:
+            return os.path.join(self.root, 'processed_{}.pt'.format(split))
 
     def download(self):
         if not os.path.exists(self.root):
@@ -112,8 +115,8 @@ def get_dataloader(args):
     if args.dataset=='text8':
         time_steps = args.timesteps if args.use_cache else None
         train = Text8Dataset(seq_len=args.seq_len, split='train', download=True, timesteps=time_steps)
-        valid = Text8Dataset(seq_len=args.seq_len, split='valid', timesteps=time_steps)
-        test = Text8Dataset(seq_len=args.seq_len, split='test', timesteps=time_steps)
+        valid = Text8Dataset(seq_len=args.seq_len, split='valid')
+        test = Text8Dataset(seq_len=args.seq_len, split='test')
         sampler = torch.utils.data.distributed.DistributedSampler(train)
         train_loader = DataLoader(train, batch_size=args.batch_size//args.ngpu, num_workers=args.num_workers, sampler=sampler)
         valid_loader = DataLoader(valid, batch_size=args.batch_size//args.ngpu, shuffle=False, num_workers=args.num_workers)

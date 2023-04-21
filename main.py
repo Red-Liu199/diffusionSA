@@ -3,6 +3,7 @@ from model import LinearAttentionTransformerModel, diffusion_SA
 from imnoise import *
 import os, shutil
 import json
+import math
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
@@ -58,20 +59,19 @@ def train(local_rank:int, args):
         st = time.time()
         count=0
         with torch.no_grad():
-            eval_loss = 0
+            total_tokens = 0
+            total_log_probs = 0
             for batch, batch_ids in tqdm(dev_dataloader):
-                loss = diffusinSA.cal_loss(batch, mode='test', batch_ids=batch_ids)
-                eval_loss += loss
-                count +=1
+                log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                total_tokens += torch.numel(batch)
+                total_log_probs += log_probs*batch.size(0)
+                count += 1
                 if count>=10:
                     break
-        if local_rank==0:
-            print('Init_eval_loss:', eval_loss)
+        avg_log_prob = total_log_probs/total_tokens
+        bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
-        print('Init eval time:{:.2f}, dev loss:{:.3f}'.format(total_time, eval_loss))
-        checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', 'checkpoint_init.pt')
-        # if resuming is needed, then optimizer and scheduler must be saved too
-        torch.save(denosing_model.state_dict(), checkpoint_path)
+        print('Init eval time:{:.2f}, dev tokens:{}, dev bpc:{:.3f}'.format(total_time, total_tokens, bpc))
 
     # training
     step = 0
@@ -98,14 +98,17 @@ def train(local_rank:int, args):
             denosing_model.eval()
             st = time.time()
             with torch.no_grad():
-                eval_loss = 0
+                total_tokens = 0
+                total_log_probs = 0
                 for batch, batch_ids in tqdm(dev_dataloader):
-                    loss = diffusinSA.cal_loss(batch, mode='test', batch_ids=batch_ids)
-                    eval_loss += loss
-            if local_rank==0:
-                tb_writer.add_scalar('eval_loss', eval_loss, epoch)
+                    log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                    total_tokens += torch.numel(batch)
+                    total_log_probs += log_probs*batch.size(0)
+            avg_log_prob = total_log_probs/total_tokens
+            bpc = -avg_log_prob/math.log(2)
+            tb_writer.add_scalar('eval_bpc', bpc, epoch)
             total_time = (time.time()-st)/60
-            print('Epoch:{}, eval time:{:.2f}, dev loss:{:.3f}'.format(epoch, total_time, eval_loss))
+            print('Epoch:{}, eval time:{:.2f}, dev tokens:{}, dev bpc:{:.3f}'.format(epoch, total_time, total_tokens, bpc))
             checkpoint_path = os.path.join(args.exp_dir, 'checkpoint', f'checkpoint_{epoch}.pt')
             # if resuming is needed, then optimizer and scheduler must be saved too
             torch.save(denosing_model.state_dict(), checkpoint_path)
@@ -127,12 +130,12 @@ if __name__=='__main__':
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--init_eval', type=bool, default=False)
+    parser.add_argument('--init_eval', action="store_true")
     # diffusion SA
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
     parser.add_argument('--beta_schedule', type=str, default='linear')
-    parser.add_argument('--use_cache', type=bool, default=False)
+    parser.add_argument('--use_cache', action="store_true")
     args = parser.parse_args()
     if args.cfg_path is None:
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
