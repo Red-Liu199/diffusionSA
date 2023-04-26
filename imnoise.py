@@ -41,5 +41,8 @@ def imnoise_multinomial(x: torch.tensor, beta, num_classes):
     return log_prob
     
 
-def imnoise_bigram():
-    pass
+def imnoise_bigram(x: torch.tensor, bigram_model: dict, beta, vocab_size: int):
+    # bigram_model: bigram_model(w1, w2) = Prob(w2|w1)
+    # x: (B,L)
+    x_length = x.size[-1]
+    

@@ -33,6 +33,8 @@ def train(local_rank:int, args):
     train_dataloader, dev_dataloader, test_dataloader = get_dataloader(args)
     # initialize model
     cfg = json.load(open(args.cfg_path, 'r'))
+    cfg['model']['input_dim'] = 27 if args.character_level else args.vocab_size
+    cfg['model']['output_dim'] = 27 if args.character_level else args.vocab_size
     model_cfg = cfg['model']
     denosing_model = LinearAttentionTransformerModel(**model_cfg)
     denosing_model.to(f'cuda:{local_rank}')
@@ -91,6 +93,8 @@ def train(local_rank:int, args):
             optimizer.zero_grad()
             scheduler.step()
             step += 1
+            if args.debugging and step>=100: # only run several training steps in debugging mode
+                break
             if local_rank==0:
                 tb_writer.add_scalar('lr', optimizer.param_groups[0]['lr'], step)
                 tb_writer.add_scalar('train_loss', loss, step)
@@ -118,7 +122,7 @@ def train(local_rank:int, args):
             save_checkpoint(checkpoint_path, denosing_model, optimizer, scheduler)
             
 def test(local_rank:int, args):
-    dist_url='tcp://localhost:13457'
+    dist_url='tcp://localhost:13458'
     dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
     # load data
     train_dataloader, dev_dataloader, test_dataloader = get_dataloader(args)
@@ -136,7 +140,8 @@ def test(local_rank:int, args):
     store_sample_path = args.checkpoint[:-3]+'.json'
     samples = {
         'proposals':[],
-        'predictions':[]
+        'predictions':[],
+        'samples':[]
     }
     imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
@@ -155,9 +160,13 @@ def test(local_rank:int, args):
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 if batch_num<store_batch_num:
-                    samples['proposals'].append(x_series_proposed.cpu().numpy())
-                    samples['predictions'].append(x_series_pred.cpu().numpy())
+                    samples['proposals'].append(x_series_proposed.cpu().tolist())
+                    samples['predictions'].append(x_series_pred.cpu().tolist())
+                    denoised_x_series_samples=diffusinSA.sample_x(batch.shape, greedy=args.greedy_sampling)
+                    samples['samples'].append(denoised_x_series_samples.cpu().tolist())
                     batch_num +=1
+                    if args.debugging:
+                        break
         avg_log_prob = total_log_probs/total_tokens
         bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
@@ -172,6 +181,8 @@ if __name__=='__main__':
     parser.add_argument('--dataset', type=str, default='text8')
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--seq_len', type=int, default=256)
+    parser.add_argument('--character_level', action="store_true")
+    parser.add_argument('--vocab_size', type=int, default=-1)
     # training
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--optimizer', type=str, default='adam')
@@ -181,9 +192,11 @@ if __name__=='__main__':
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--init_eval', action="store_true")
+    parser.add_argument('--debugging', action="store_true", help="debugging mode")
     # testing
     parser.add_argument('--test', action="store_true")
     parser.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
+    parser.add_argument('--greedy_sampling', action="store_true")
     # diffusion SA
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
@@ -194,6 +207,7 @@ if __name__=='__main__':
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
         assert os.path.exists(args.cfg_path), "No model configuration file specified"
     set_seeds(args.seed)
+    print(args)
     if args.test:
         mp.spawn(test, nprocs=1, args=(args,))
     else:
