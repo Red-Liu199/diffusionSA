@@ -22,7 +22,7 @@ def save_checkpoint(path, model, optimizer, scheduler):
     checkpoint = {
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
-        'scheduler': scheduler.state_dict()
+        'scheduler': scheduler.state_dict() if scheduler is not None else None
         }
     torch.save(checkpoint, path)
 
@@ -30,7 +30,8 @@ def load_checkpoint(path, model, optimizer, scheduler):
     checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
-    scheduler.load_state_dict(checkpoint['scheduler'])
+    if checkpoint['scheduler'] is not None:
+        scheduler.load_state_dict(checkpoint['scheduler'])
 
 class Vocab():
     

@@ -95,6 +95,30 @@ class LinearAttentionTransformerModel(nn.Module):
         h = self.norm(h)
         return self.out(h)
 
+class NeuralNGram(nn.Module):
+    def __init__(self, num_classes: int, emb_dim: int, conv_dim: int, kernel_size: int = 3) -> None:
+        self.embedding = nn.Embedding(num_classes, emb_dim)
+        self.classifier = nn.Linear(emb_dim, num_classes)
+        self.act = nn.Tanh()
+        self.conv = nn.Sequential(
+            nn.ConstantPad1d((kernel_size-1, 0), 0),
+            nn.Conv1d(emb_dim, conv_dim, kernel_size=kernel_size)
+        )
+
+    def forward(self, x: torch.Tensor):
+        """
+        x: (N, T)
+        -> embedded (N, T, E)
+        -> transpose (N, E, T)
+        -> act & conv (N, H, T)
+        -> transpose (N, T, H)
+        -> linear (N, T, V)
+        """
+        x = self.embedding(x)
+        x = self.conv(self.act(x).transpose(1, 2)).transpose(1, 2)
+        logits = self.classifier(x)
+        loss = F.cross_entropy(logits[:, :-1, :], x[:, 1:])
+        return logits, loss
 
 class diffusion_SA(object):
     def __init__(self, imnoise_func: Callable, denoise_func: nn.Module, timesteps: int, beta_schedule: Callable, use_cache: bool, dataset) -> None:
