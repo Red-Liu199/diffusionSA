@@ -180,9 +180,9 @@ if __name__=='__main__':
     # dataset
     parser.add_argument('--dataset', type=str, default='text8')
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--seq_len', type=int, default=256)
+    parser.add_argument('--seq_len', type=int, default=128)
     parser.add_argument('--character_level', action="store_true")
-    parser.add_argument('--vocab_size', type=int, default=-1)
+    parser.add_argument('--vocab_size', type=int, default=500)
     # training
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--optimizer', type=str, default='adam')
