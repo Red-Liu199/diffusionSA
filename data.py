@@ -153,7 +153,7 @@ class Text8Dataset(Dataset):
 
 def get_dataloader(args):
     if args.dataset=='text8':
-        time_steps = args.timesteps if args.use_cache else None
+        time_steps = args.timesteps if hasattr(args, 'use_cache') and args.use_cache else None
         train = Text8Dataset(seq_len=args.seq_len, split='train', download=True, timesteps=time_steps, character_level=args.character_level, vocab_size=args.vocab_size)
         valid = Text8Dataset(seq_len=args.seq_len, split='valid', character_level=args.character_level, vocab_size=args.vocab_size)
         test = Text8Dataset(seq_len=args.seq_len, split='test', character_level=args.character_level, vocab_size=args.vocab_size)

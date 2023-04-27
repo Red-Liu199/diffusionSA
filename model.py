@@ -97,6 +97,7 @@ class LinearAttentionTransformerModel(nn.Module):
 
 class NeuralNGram(nn.Module):
     def __init__(self, num_classes: int, emb_dim: int, conv_dim: int, kernel_size: int = 3) -> None:
+        super().__init__()
         self.embedding = nn.Embedding(num_classes, emb_dim)
         self.classifier = nn.Linear(emb_dim, num_classes)
         self.act = nn.Tanh()
@@ -114,10 +115,11 @@ class NeuralNGram(nn.Module):
         -> transpose (N, T, H)
         -> linear (N, T, V)
         """
+        target = x[:, 1:]
         x = self.embedding(x)
         x = self.conv(self.act(x).transpose(1, 2)).transpose(1, 2)
         logits = self.classifier(x)
-        loss = F.cross_entropy(logits[:, :-1, :], x[:, 1:])
+        loss = F.cross_entropy(logits[:, :-1, :].transpose(1, 2), target)
         return logits, loss
 
 class diffusion_SA(object):
