@@ -28,21 +28,64 @@ def index_to_log_onehot(x, num_classes):
         f'Error: {x.max().item()} >= {num_classes}'
     
     x_onehot = F.one_hot(x, num_classes) # (B, L, C)
-    # permute_order = (0, -1) + tuple(range(1, len(x.size()))) # (0, -1, 1) if x is two-dimensional
-    # x_onehot = x_onehot.permute(permute_order) # (B, C, L)
     log_x = torch.log(x_onehot.float().clamp(min=1e-30)) # -30 or 0
 
     return log_x
 
-def imnoise_multinomial(x: torch.tensor, beta, num_classes):
+def imnoise_multinomial(x: torch.tensor, beta, num_classes, target_samples=None):
     # x: (B, L)
+    # return log_probs (B,) of each sentence and noisy samples
+    # target_samples (B, L): if it is not None, then the function is to score the transition: x --> target_samples
     log_x_onehot = index_to_log_onehot(x, num_classes).float() # (B,L,C)
-    log_prob = torch.logaddexp(np.log(1-beta)+log_x_onehot, torch.tensor(np.log(beta)-np.log(num_classes), device=x.device))
-    return log_prob
+    log_prob = torch.logaddexp(np.log(1-beta)+log_x_onehot, torch.tensor(np.log(beta)-np.log(num_classes), device=x.device)) # (B,L,C)
+    if target_samples is None:
+        prob = log_prob.exp().view(-1, log_prob.size(-1)) #(B*L, C)
+        x_noise = torch.multinomial(prob, 1).view(log_prob.shape[:-1]) # (B, L)
+        log_sent_prob = log_prob.gather(index=x_noise.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1) # (B,)
+        return log_sent_prob, x_noise
+    else:
+        log_sent_prob = log_prob.gather(index=target_samples.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1)
+        return log_sent_prob
     
 
-def imnoise_bigram(x: torch.tensor, bigram_model: dict, beta, vocab_size: int):
-    # bigram_model: bigram_model(w1, w2) = Prob(w2|w1)
+def imnoise_ngram(x: torch.tensor, ngram: int, model, beta, vocab_size: int, target_samples=None):
     # x: (B,L)
-    x_length = x.size[-1]
-    
+    # ngram: 2,3,4
+    # model: the ngram model, model(x_{i-ngram+1,...,i-1}) = prob(x_i|x_{i-ngram+1,...,i-1})
+    if target_samples is None:
+        seq_len = x.size(1)
+        x_noise = x.clone()
+        log_probs = torch.zeros((x.size(0)), dtype=torch.float, device=x.device) # (B,)
+        for i in range(seq_len):
+            # autoregressive
+            if i<ngram-1:
+                # the noise distribution of the first few tokens is uniform distribution
+                log_onehot = index_to_log_onehot(x_noise[:, i], vocab_size) #  B,V
+                log_prob = torch.logaddexp(np.log(1-beta)+log_onehot, torch.tensor(np.log(beta)-np.log(vocab_size), device=x.device)) # (B,V)
+                prob = log_prob.exp()
+            else:
+                # the noise distribution is the ngram distribution given previous N tokens
+                model_input = x_noise[:, i-ngram+1:i] # B,N
+                prob_model = model.forward(model_input) # B, N, V
+                prob_model = prob_model[:, -1, :] # B,V
+                prob = (1-beta)*F.one_hot(x_noise[:, i], vocab_size).float() + beta*prob_model
+
+            x_i_noise = torch.multinomial(prob, 1).squeeze() # (B,)
+            log_probs += torch.log(prob.clamp(min=1e-30)).gather(index=x_i_noise.unsqueeze(1), dim=1).squeeze(1) # (B,)
+            x_noise[:, i] = x_i_noise
+        return log_probs, x_noise
+    else:
+        next_token_log_probs = torch.log(model.forward(target_samples).clamp(min=1e-30)) # (B, L, V)
+        log_onehot = index_to_log_onehot(x, vocab_size) #  B, L, V
+        log_probs = torch.logaddexp(np.log(1-beta)+log_onehot, np.log(beta)+next_token_log_probs) # (B, L, V)
+        log_sent_probs = log_probs.gather(index=target_samples.unsqueeze(-1), dim=-1).squeeze(-1) # (B, L)
+        return log_sent_probs.sum(-1)
+        
+
+    # x_onehot = F.one_hot(x, vocab_size) # B,L,V
+    # p_x_given_xm1 = torch.matmul(x_onehot.float(), bigram_matrix) # p(·|x_{i-1}) shape:(B,L,V)
+    # p_xp1_given_x = torch.matmul(x_onehot.float(), bigram_matrix.T) # p(x_{i+1}|·) shape:(B,L,V)
+    # paddings = torch.ones((x.size(0), 1, vocab_size), dtype=torch.float) # B,1,V
+    # p_x_given_xm1 = torch.cat((paddings, p_x_given_xm1[:, :-1, :]), dim=1)
+    # p_xp1_given_x = torch.cat((p_xp1_given_x[:, 1:, :], paddings), dim=1)
+    # p_x = p_x_given_xm1*p_xp1_given_x 

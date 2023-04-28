@@ -1,5 +1,7 @@
+from aifc import Error
 from distutils.log import log
 import math
+import json
 import numpy as np
 import random
 import torch
@@ -8,6 +10,7 @@ import torch.nn.functional as F
 from axial_positional_embedding import AxialPositionalEmbedding
 from linear_attention_transformer import LinearAttentionTransformer
 from imnoise import *
+from utils import load_checkpoint
 from typing import Callable, Literal
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim, num_steps, rescale_steps=4000):
@@ -122,8 +125,81 @@ class NeuralNGram(nn.Module):
         loss = F.cross_entropy(logits[:, :-1, :].transpose(1, 2), target)
         return logits, loss
 
+class WrappedNGram(object):
+    def __init__(self, ngram_model) -> None:
+        self.ngram_model = ngram_model
+    
+    def forward(self, x):
+        # x:(B,L)
+        if isinstance(self.ngram_model, nn.Module):
+            with torch.no_grad():
+                logits, _ = self.ngram_model(x) # B,L,V
+                probs = F.softmax(logits, dim=-1)
+        else:
+            pass
+        return probs
+
+class noise_model(object):
+    def __init__(self, method, num_classes, device) -> None:
+        self.num_classes = num_classes
+        print('Imnoise method:', method)
+        if method=='multinomial':
+            self.imnoise_func = imnoise_multinomial
+        else:
+            ngram_map = {'bigram':2, 'trigram':3, 'fourgram':4}
+            self.imnoise_func = imnoise_ngram
+            self.ngram = ngram_map[method]
+            # here we load the neural ngram model trained before, you can load your own ngram model here
+            # ngram_model: an autoregressive language model which only consider N tokens to predict next token
+            model_dir = f'exp/{self.ngram}gram/'
+            model_cfg = json.load(open(model_dir+'config.json', 'r'))
+            ngram_model = NeuralNGram(model_cfg['vocab_size'], model_cfg['embed_dim'], model_cfg['conv_dim'], model_cfg['ngram']-1)
+            load_checkpoint(model_dir+'checkpoint/checkpoint.pt', ngram_model, None, None)
+            ngram_model.to(device)
+            self.ngram_model = WrappedNGram(ngram_model)
+
+    def imnoise(self, x: torch.tensor, beta, num_classes, target_samples):
+        if self.imnoise_func==imnoise_multinomial:
+            return self.imnoise_func(x, beta, num_classes=num_classes, target_samples=target_samples)
+        elif self.imnoise_func==imnoise_ngram:
+            return self.imnoise_func(x, ngram=self.ngram, model=self.ngram_model, beta=beta, vocab_size=num_classes, target_samples=target_samples)
+        else:
+            raise ValueError
+
+    def score_noise(self, x):
+        # x: (B, L)
+        if self.imnoise_func == imnoise_multinomial:
+            # uniform distribution for every token
+            log_probs = -np.log(self.num_classes)*torch.ones(x.shape)
+            log_probs = log_probs.sum(-1) # (B,)
+        elif self.imnoise_func == imnoise_ngram:
+            probs = self.ngram_model.forward(x) # B,L,V
+            log_probs = torch.log(probs.clamp(min=1e-30))
+            log_probs = log_probs[:, :-1, :].gather(index=x[:, 1:].unsqueeze(-1), dim=-1).squeeze(-1) # B,L
+            log_probs = log_probs.sum(-1)
+        else:
+            raise ValueError
+        return log_probs
+
+    def sample_noise(self, sample_size):
+        # sample_size=(B,L)
+        if self.imnoise_func == imnoise_multinomial:
+            x = torch.randint(0, self.num_classes, sample_size)
+        elif self.imnoise_func == imnoise_ngram:
+            batch_size = sample_size[0]
+            start_tokens = torch.randint(0, self.num_classes, (batch_size, self.ngram-1)) # B, N-1
+            x = torch.zeros(sample_size, dtype=torch.long) # B,L
+            for k in range(sample_size[1]):
+                probs = self.ngram_model.forward(start_tokens) # B, N-1, V
+                next_token_probs = probs[:, -1, :] # B,V
+                x_k_noise = torch.multinomial(next_token_probs, 1).squeeze() # (B,)
+                x[:, k] = x_k_noise
+                start_tokens = torch.cat((start_tokens[:, 1:], x_k_noise.unsqueeze(-1)), dim=-1)
+        return x
+
 class diffusion_SA(object):
     def __init__(self, imnoise_func: Callable, denoise_func: nn.Module, timesteps: int, beta_schedule: Callable, use_cache: bool, dataset) -> None:
+        
         self.imnoise_func = imnoise_func
         self.denoise_func = denoise_func
         self.timesteps = timesteps
@@ -131,6 +207,7 @@ class diffusion_SA(object):
         self.use_cache = use_cache
         self.dataset = dataset
         self.num_classes = self.denoise_func.module.num_classes
+        
     
     def proposal(self, x_0, mode:Literal['single', 'all']='all', time_idx= None):
         # x_0: a batch of data, size (B, L)
@@ -141,11 +218,9 @@ class diffusion_SA(object):
             x_series=[x_0]
             log_q_probs = 0
             for t in range(self.timesteps):
-                log_x_prob = self.imnoise_func(x, self.betas[t], num_classes=self.num_classes) # (B, L, C)
-                x_prob = log_x_prob.exp().view(-1, log_x_prob.size(-1)) #(B*L, C)
-                x = torch.multinomial(x_prob, 1).view(log_x_prob.shape[:-1]) # (B, L)
+                log_x_prob, x = self.imnoise_func.imnoise(x.to(self.denoise_func.device), self.betas[t], num_classes=self.num_classes, target_samples=None) # (B,), (B,L)
                 x_series.append(x)
-                log_q_probs += log_x_prob.gather(index=x.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1) # (B,)
+                log_q_probs += log_x_prob # (B,)
         # x_series: [(B, L), (B, L), ...] --> (T+1, B, L)
         x_series = torch.stack(x_series, dim=0)
         return x_series, log_q_probs
@@ -156,31 +231,13 @@ class diffusion_SA(object):
         for t in range(1, len(x_series)):
             x_t = x_series[t]
             x_tm1 = x_series[t-1]
-            log_x_prob = self.imnoise_func(x_tm1, self.betas[t-1], num_classes=self.denoise_func.module.num_classes) # (B, L, C)
-            log_q_probs += log_x_prob.gather(index=x_t.unsqueeze(-1), dim=-1).squeeze(-1).sum(-1) # (B,)
+            log_x_prob = self.imnoise_func.imnoise(x_tm1, self.betas[t-1], num_classes=self.num_classes, target_samples=x_t) # (B,)
+            log_q_probs += log_x_prob # (B,)
         return log_q_probs
-
-    def log_q_x_T(self, x_T):
-        # x_T: (B, L)
-        if self.imnoise_func == imnoise_multinomial:
-            # uniform distribution for every token
-            log_probs = -np.log(self.num_classes)*torch.ones(x_T.shape)
-            log_probs = log_probs.sum(-1) # (B,)
-        elif self.imnoise_func == imnoise_bigram:
-            pass
-        return log_probs
-
-    def sample_x_T(self, sample_size):
-        # x_T: (B, L)
-        if self.imnoise_func == imnoise_multinomial:
-            x_T = torch.randint(0, self.num_classes, sample_size)
-        elif self.imnoise_func == imnoise_bigram:
-            pass
-        return x_T
     
     def sample_x(self, sample_size, greedy=False):
         # sample x from x_T from denoising model
-        x_T = self.sample_x_T(sample_size).to(self.denoise_func.device) # B, L
+        x_T = self.imnoise_func.sample_noise(sample_size).to(self.denoise_func.device) # B, L
         x_series = torch.zeros((self.timesteps+1,)+tuple(sample_size), dtype=torch.long, device=x_T.device) # T+1, B, L
         x_series[self.timesteps, :, :] = x_T
         for t in range(self.timesteps, 0, -1):
@@ -212,7 +269,7 @@ class diffusion_SA(object):
                     x_tm1_pred = logits.argmax(-1) # B, L
                     x_series_preds[t-1, :, :] = x_tm1_pred
             # we assume that logp(x_T)=logq(x_T|x_0)
-            log_p_probs += self.log_q_x_T(x_series[-1]).to(log_p_probs.device)
+            log_p_probs += self.imnoise_func.score_noise(x_series[-1]).to(log_p_probs.device)
             if return_samples:
                 return log_p_probs, x_series_preds
             else:
@@ -224,9 +281,9 @@ class diffusion_SA(object):
         if self.use_cache:
             # x_0: (B,T+1,L)
             for i in range(steps):
-                x_proposals, log_q = self.proposal(x_0[:, 0, :]) # (T+1, B, L)
+                x_proposals, log_q = self.proposal(x_0[:, 0, :].to(self.denoise_func.device)) # (T+1, B, L)
                 total_poposal_num += x_0.size(0)
-                log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
+                log_p = self.denoising_score(x_proposals) # (B,)
                 if x_0[0, 1, 0]==-1: # the first step, directly accept all
                     x_series = x_proposals
                     pv_log_p = log_p
@@ -236,10 +293,10 @@ class diffusion_SA(object):
                     accept_num += x_0.size(0)
                 else:
                     # x_0 is the previous x series
-                    x_series = x_0.permute(1, 0, 2) #(T+1, B, L)
-                    pv_log_p = self.denoising_score(x_series.to(self.denoise_func.device))
+                    x_series = x_0.permute(1, 0, 2).to(self.denoise_func.device) #(T+1, B, L)
+                    pv_log_p = self.denoising_score(x_series)
                     pv_log_q = self.imnoising_score(x_series)
-                    log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
+                    log_accept_prob = log_p - pv_log_p + pv_log_q.to(log_p.device) - log_q.to(log_p.deivce) # (B, )
                     accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
                     change_flag = False
                     for b in range(x_0.size(0)):
@@ -257,16 +314,16 @@ class diffusion_SA(object):
             # x_0: (B,L)
             x_series = None
             for i in range(steps):
-                x_proposals, log_q = self.proposal(x_0) # (T+1, B, L)
+                x_proposals, log_q = self.proposal(x_0.to(self.denoise_func.device)) # (T+1, B, L)
                 total_poposal_num += x_0.size(0)
-                log_p = self.denoising_score(x_proposals.to(self.denoise_func.device)) # (B,)
+                log_p = self.denoising_score(x_proposals) # (B,)
                 if x_series is None: # the first step, directly accept all
                     x_series = x_proposals
                     pv_log_p = log_p
                     pv_log_q = log_q
                     accept_num += x_0.size(0)
                 else:
-                    log_accept_prob = log_p.cpu() - pv_log_p.cpu() + pv_log_q - log_q # (B, )
+                    log_accept_prob = log_p - pv_log_p + pv_log_q.to(log_p.device) - log_q.to(log_p.device) # (B, )
                     accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
                     for b in range(x_0.size(0)):
                         randnum = random.random()
@@ -301,7 +358,7 @@ class diffusion_SA(object):
             return total_loss, accept_rate
         else:
             # return log_prob(input_data)
-            x_proposals, log_q = self.proposal(input_data) # (T+1, B, L)
-            log_p, x_preds = self.denoising_score(x_proposals.to(self.denoise_func.device), return_samples=True) # (B,)
-            return torch.mean(log_p.cpu() - log_q).item(), x_proposals, x_preds
+            x_proposals, log_q = self.proposal(input_data.to(self.denoise_func.device)) # (T+1, B, L)
+            log_p, x_preds = self.denoising_score(x_proposals, return_samples=True) # (B,)
+            return torch.mean(log_p - log_q.to(log_p.device)).item(), x_proposals, x_preds
 

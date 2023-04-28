@@ -1,5 +1,5 @@
 import argparse
-from model import LinearAttentionTransformerModel, diffusion_SA
+from model import LinearAttentionTransformerModel, diffusion_SA, noise_model
 from imnoise import *
 import os, shutil
 import json
@@ -8,7 +8,7 @@ import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_polynomial_decay_schedule_with_warmup as get_scheduler
 from torch.utils.tensorboard import SummaryWriter
 from utils import *
 from data import get_dataloader
@@ -39,9 +39,9 @@ def train(local_rank:int, args):
     denosing_model = LinearAttentionTransformerModel(**model_cfg)
     denosing_model.to(f'cuda:{local_rank}')
     denosing_model = DDP(denosing_model, device_ids=[local_rank], output_device=local_rank)
-    imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
-    diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+    imnosing_model = noise_model(args.imnoise_method, args.vocab_size, device=local_rank)
+    diffusinSA = diffusion_SA(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
         use_cache=args.use_cache, dataset=train_dataloader.dataset)
     # save config
     if local_rank==0:
@@ -54,7 +54,7 @@ def train(local_rank:int, args):
     if local_rank==0:
         print('Total sentences:{}, batch size:{}, batch num for one gpu:{}, epochs:{}, total steps:{}'.format(
             len(train_dataloader.dataset), args.batch_size, len(train_dataloader), args.epochs, total_steps))
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps)
+    scheduler = get_scheduler(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps)
     
     # init_eval
     if args.init_eval and local_rank==0:
@@ -143,9 +143,9 @@ def test(local_rank:int, args):
         'predictions':[],
         'samples':[]
     }
-    imnoise_func = imnoise_multinomial if args.imnoise_method=='multinomial' else imnoise_bigram
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
-    diffusinSA = diffusion_SA(imnoise_func, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+    imnosing_model = noise_model(args.imnoise_method, args.vocab_size, device=local_rank)
+    diffusinSA = diffusion_SA(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
         use_cache=args.use_cache, dataset=train_dataloader.dataset)
     # validation
     if local_rank==0:
@@ -198,7 +198,7 @@ if __name__=='__main__':
     parser.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
     parser.add_argument('--greedy_sampling', action="store_true")
     # diffusion SA
-    parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram'], default='multinomial')
+    parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram', 'trigram', 'fourgram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
     parser.add_argument('--beta_schedule', type=str, default='linear')
     parser.add_argument('--use_cache', action="store_true")

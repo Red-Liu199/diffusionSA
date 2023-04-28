@@ -4,8 +4,7 @@ import torch
 import json
 import os
 import torch.nn as nn
-
-
+from collections import OrderedDict
 def set_seeds(seed, cuda_deterministic=False):
     if seed is not None:
         random.seed(seed)
@@ -28,9 +27,18 @@ def save_checkpoint(path, model, optimizer, scheduler):
 
 def load_checkpoint(path, model, optimizer, scheduler):
     checkpoint = torch.load(path)
-    model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
-    if checkpoint['scheduler'] is not None:
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model.load_state_dict(checkpoint['model'])
+    else:
+        state_dict = checkpoint['model']
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            # remove the 'module.'
+            new_state_dict[k[7:]] = v
+        model.load_state_dict(new_state_dict)
+    if optimizer is not None:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+    if scheduler is not None and checkpoint['scheduler'] is not None:
         scheduler.load_state_dict(checkpoint['scheduler'])
 
 class Vocab():
