@@ -31,6 +31,7 @@ class Text8Dataset(Dataset):
         self.seq_len = seq_len
         self.split = split
         self.timesteps = timesteps
+        self.vocab_size = vocab_size
 
         if not os.path.exists(self.raw_file):
             if download:
@@ -135,7 +136,7 @@ class Text8Dataset(Dataset):
         return os.path.join(self.root, 'text8.zip')
 
     def processed_file(self, split, character_level=True):
-        spm_field = '' if character_level else '_spm'
+        spm_field = '' if character_level else f'_spm{self.vocab_size}'
         if self.timesteps is not None:
             return os.path.join(self.root, 'processed{}_{}_cache.pt'.format(spm_field, split))
         else:

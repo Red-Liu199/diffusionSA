@@ -142,7 +142,6 @@ class WrappedNGram(object):
 class noise_model(object):
     def __init__(self, method, num_classes, device) -> None:
         self.num_classes = num_classes
-        print('Imnoise method:', method)
         if method=='multinomial':
             self.imnoise_func = imnoise_multinomial
         else:
@@ -289,7 +288,7 @@ class diffusion_SA(object):
                     pv_log_p = log_p
                     pv_log_q = log_q
                     # update the sample cache
-                    self.dataset.data[batch_ids] = x_proposals.permute(1, 0, 2).clone()
+                    self.dataset.data[batch_ids] = x_proposals.permute(1, 0, 2).cpu().clone()
                     accept_num += x_0.size(0)
                 else:
                     # x_0 is the previous x series
@@ -308,7 +307,7 @@ class diffusion_SA(object):
                             pv_log_p[b] = log_p[b]
                             pv_log_q[b] = log_q[b]
                     if change_flag:
-                        self.dataset.data[batch_ids] = x_series.permute(1, 0, 2).clone()
+                        self.dataset.data[batch_ids] = x_series.permute(1, 0, 2).cpu().clone()
 
         else:
             # x_0: (B,L)
