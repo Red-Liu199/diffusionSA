@@ -66,12 +66,14 @@ def train(local_rank:int, args):
             total_tokens = 0
             total_log_probs = 0
             for batch, batch_ids in tqdm(dev_dataloader):
-                log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log prob per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 count += 1
                 if count>=10:
                     break
+        if args.dataset=='text8': # text8 has 5M characters in dev and test set
+            total_tokens = 5000000
         avg_log_prob = total_log_probs/total_tokens
         bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
@@ -113,6 +115,8 @@ def train(local_rank:int, args):
                     log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
                     total_tokens += torch.numel(batch)
                     total_log_probs += log_probs*batch.size(0)
+            if args.dataset=='text8': # text8 has 5M characters in dev and test set
+                total_tokens = 5000000
             avg_log_prob = total_log_probs/total_tokens
             bpc = -avg_log_prob/math.log(2)
             tb_writer.add_scalar('eval_bpc', bpc, epoch)
@@ -167,6 +171,8 @@ def test(local_rank:int, args):
                     batch_num +=1
                     if args.debugging:
                         break
+        if args.dataset=='text8': # text8 has 5M characters in dev and test set
+            total_tokens = 5000000
         avg_log_prob = total_log_probs/total_tokens
         bpc = -avg_log_prob/math.log(2)
         total_time = (time.time()-st)/60
