@@ -93,7 +93,7 @@ def train(local_rank:int, args):
             optimizer.zero_grad()
             scheduler.step()
             step += 1
-            if args.debugging and step>=100: # only run several training steps in debugging mode
+            if args.debugging and step>=10: # only run several training steps in debugging mode
                 break
             if local_rank==0:
                 tb_writer.add_scalar('lr', optimizer.param_groups[0]['lr'], step)

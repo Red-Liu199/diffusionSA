@@ -295,7 +295,7 @@ class diffusion_SA(object):
                     x_series = x_0.permute(1, 0, 2).to(self.denoise_func.device) #(T+1, B, L)
                     pv_log_p = self.denoising_score(x_series)
                     pv_log_q = self.imnoising_score(x_series)
-                    log_accept_prob = log_p - pv_log_p + pv_log_q.to(log_p.device) - log_q.to(log_p.deivce) # (B, )
+                    log_accept_prob = log_p - pv_log_p + pv_log_q.to(log_p.device) - log_q.to(log_p.device) # (B, )
                     accept_prob = torch.clamp(log_accept_prob.exp(), max=1) # (B,)
                     change_flag = False
                     for b in range(x_0.size(0)):
