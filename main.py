@@ -16,6 +16,7 @@ import time
 from tqdm import tqdm
 
 def train(local_rank:int, args):
+    torch.cuda.set_device(local_rank)
     dist_url='tcp://localhost:13457'
     dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
     # assign log writer and checkpoint dir
@@ -126,7 +127,7 @@ def train(local_rank:int, args):
             save_checkpoint(checkpoint_path, denosing_model, optimizer, scheduler)
             
 def test(local_rank:int, args):
-    dist_url='tcp://localhost:13458'
+    dist_url='tcp://localhost:13459'
     dist.init_process_group(backend='nccl', init_method=dist_url, world_size=args.ngpu, rank=local_rank)
     # load data
     train_dataloader, dev_dataloader, test_dataloader = get_dataloader(args)
@@ -160,7 +161,8 @@ def test(local_rank:int, args):
             total_log_probs = 0
             batch_num = 0
             for batch, _ in tqdm(dev_dataloader):
-                log_probs, x_series_proposed, x_series_pred = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                log_probs, x_series_proposed, x_series_pred = diffusinSA.cal_loss(
+                    batch, mode='test', eval_sample_num=args.eval_sample_num) # avg log probs per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 if batch_num<store_batch_num:
@@ -203,6 +205,7 @@ if __name__=='__main__':
     parser.add_argument('--test', action="store_true")
     parser.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
     parser.add_argument('--greedy_sampling', action="store_true")
+    parser.add_argument('--eval_sample_num', type=int, default=100, help="sampling number for evaluating the log prob")
     # diffusion SA
     parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram', 'trigram', 'fourgram'], default='multinomial')
     parser.add_argument('--timesteps', type=int, default=5)
@@ -213,8 +216,15 @@ if __name__=='__main__':
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
         assert os.path.exists(args.cfg_path), "No model configuration file specified"
     set_seeds(args.seed)
-    print(args)
     if args.test:
+        cfg = json.load(open(args.cfg_path, 'r'))
+        cfg = cfg['others']
+        for key in ['test', 'checkpoint', 'greedy_sampling', 'ngpu', 'cfg_path', 'eval_sample_num']: # pop test settings
+            if key in cfg:
+                cfg.pop(key)
+        args.__dict__.update(cfg)
+        print(args)
         mp.spawn(test, nprocs=1, args=(args,))
     else:
+        print(args)
         mp.spawn(train, nprocs=args.ngpu, args=(args,))

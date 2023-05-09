@@ -334,11 +334,8 @@ class diffusion_SA(object):
         accept_rate = accept_num/total_poposal_num
         return x_series, pv_log_p, pv_log_q, accept_rate
 
-    def log_prob_std(self, input_data):
-        # calculate the log prob of one sentence in a standard way
-        pass 
 
-    def cal_loss(self, input_data, mode='train', batch_ids=None):
+    def cal_loss(self, input_data, mode='train', batch_ids=None, eval_sample_num=1):
         MIS_steps = 1 if self.use_cache else 2
         if mode=='train':
             x_series, _, _, accept_rate = self.MIS(input_data, steps=MIS_steps, batch_ids=batch_ids)
@@ -357,7 +354,14 @@ class diffusion_SA(object):
             return total_loss, accept_rate
         else:
             # return log_prob(input_data)
-            x_proposals, log_q = self.proposal(input_data.to(self.denoise_func.device)) # (T+1, B, L)
-            log_p, x_preds = self.denoising_score(x_proposals, return_samples=True) # (B,)
-            return torch.mean(log_p - log_q.to(log_p.device)).item(), x_proposals, x_preds
+            total_log_p, total_log_q = 0, 0
+            for i in range(eval_sample_num):
+                x_proposals, log_q = self.proposal(input_data.to(self.denoise_func.device)) # (T+1, B, L)
+                log_p, x_preds = self.denoising_score(x_proposals, return_samples=True) # (B,)
+                total_log_p += log_p
+                total_log_q += log_q
+            total_log_p /= eval_sample_num
+            total_log_q /= eval_sample_num
+
+            return torch.mean(total_log_p - total_log_q.to(total_log_p.device)).item(), x_proposals, x_preds
 
