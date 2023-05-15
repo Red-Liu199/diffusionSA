@@ -21,21 +21,14 @@ def main(args):
         tokenizer = spm.SentencePieceProcessor(model_file=f'data/text8/spm_model{vocab_size}.model')
         decode_func = tokenizer.decode
     data = json.load(open(args.samples_path, 'r'))
-    proposals, predictions, samples = np.array(data['proposals']), np.array(data['predictions']), np.array(data['samples']) # T+1, B, L
-    print(proposals.shape)
-    sent_idx = random.randint(0, proposals.shape[2]-1)
-    one_series_proposal_sample = proposals[:, :, sent_idx, :] # T+1, L
-    one_series_prediction_sample = predictions[:, :, sent_idx, :]
+    samples = np.array(data['samples']) # T+1, B, L
+    print(samples.shape)
+    sent_idx = random.randint(0, samples.shape[2]-1)
     one_series_sample = samples[:, :, sent_idx, :]
-    # print(one_series_prediction_sample.shape)
-    # print('Proposals:')
-    # for t, sentence in enumerate(one_series_proposal_sample[0]):
-    #     print(f'Timestep:{t}\n', decode(list(sentence)))
-    # print('Predictions:')
-    # for t, sentence in enumerate(one_series_prediction_sample[0]):
-    #     print(f'Timestep:{t}\n', decode(list(sentence)))
     print('Samples:')
     for t, sentence in enumerate(one_series_sample[0]):
+        if cfg['others'].get('direct_diffusion', False) and t==1:
+            t = cfg['others']['timesteps']
         print(f'Timestep:{t}\n', decode_func(sentence.tolist()))
 if __name__=='__main__':
     parser = argparse.ArgumentParser()

@@ -34,10 +34,14 @@ def index_to_log_onehot(x, num_classes):
 
 def imnoise_multinomial(x: torch.tensor, beta, num_classes, target_samples=None):
     # x: (B, L)
+    # beta: the probability of adding noise
     # return log_probs (B,) of each sentence and noisy samples
     # target_samples (B, L): if it is not None, then the function is to score the transition: x --> target_samples
     log_x_onehot = index_to_log_onehot(x, num_classes).float() # (B,L,C)
-    log_prob = torch.logaddexp(np.log(1-beta)+log_x_onehot, torch.tensor(np.log(beta)-np.log(num_classes), device=x.device)) # (B,L,C)
+    if isinstance(beta, torch.Tensor): # beta: (B,)
+        log_prob = torch.logaddexp((1-beta).view(-1, 1, 1)+log_x_onehot, beta.view(-1,1,1)-np.log(num_classes))
+    else:
+        log_prob = torch.logaddexp(np.log(1-beta)+log_x_onehot, torch.tensor(np.log(beta)-np.log(num_classes), device=x.device)) # (B,L,C)
     if target_samples is None:
         prob = log_prob.exp().view(-1, log_prob.size(-1)) #(B*L, C)
         x_noise = torch.multinomial(prob, 1).view(log_prob.shape[:-1]) # (B, L)

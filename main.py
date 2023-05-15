@@ -1,5 +1,6 @@
 import argparse
-from model import LinearAttentionTransformerModel, diffusion_SA, noise_model
+from turtle import title
+from model import LinearAttentionTransformerModel, diffusion_SA, diffusion_SA_direct, noise_model
 from imnoise import *
 import os, shutil
 import json
@@ -42,7 +43,8 @@ def train(local_rank:int, args):
     denosing_model = DDP(denosing_model, device_ids=[local_rank], output_device=local_rank)
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
     imnosing_model = noise_model(args.imnoise_method, args.vocab_size, device=local_rank)
-    diffusinSA = diffusion_SA(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+    diffusion_cls = diffusion_SA_direct if hasattr(args, 'direct_diffusion') and args.direct_diffusion else diffusion_SA
+    diffusinSA = diffusion_cls(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
         use_cache=args.use_cache, dataset=train_dataloader.dataset)
     # save config
     if local_rank==0:
@@ -55,8 +57,11 @@ def train(local_rank:int, args):
     if local_rank==0:
         print('Total sentences:{}, batch size:{}, batch num for one gpu:{}, epochs:{}, total steps:{}'.format(
             len(train_dataloader.dataset), args.batch_size, len(train_dataloader), args.epochs, total_steps))
-    scheduler = get_scheduler(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps)
-    
+    scheduler = get_scheduler(optimizer, num_warmup_steps=args.warmup_ratio*total_steps, num_training_steps=total_steps, lr_end=1e-6)
+    # load resume checkpoint
+    if hasattr(args, 'resume'):
+        print('Load checkpoint from {}'.format(args.resume))
+        load_checkpoint(args.resume, denosing_model, optimizer, scheduler)
     # init_eval
     if args.init_eval and local_rank==0:
         print('****Init Evaluation****')
@@ -67,7 +72,7 @@ def train(local_rank:int, args):
             total_tokens = 0
             total_log_probs = 0
             for batch, batch_ids in tqdm(dev_dataloader):
-                log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log prob per sentence
+                log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log prob per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 count += 1
@@ -89,9 +94,7 @@ def train(local_rank:int, args):
         denosing_model.train()
         st = time.time()
         for batch, batch_ids in tqdm(train_dataloader):
-            loss, accept_rate = diffusinSA.cal_loss(batch, mode='train', batch_ids=batch_ids) # backward
-            # loss = diffusinSA.cal_loss(batch)
-            # loss.backward()
+            loss, accept_rate = diffusinSA.cal_loss(batch, mode='train', batch_ids=batch_ids, train_sample_steps = args.train_sample_steps) # backward
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
@@ -113,7 +116,7 @@ def train(local_rank:int, args):
                 total_tokens = 0
                 total_log_probs = 0
                 for batch, batch_ids in tqdm(dev_dataloader):
-                    log_probs, _, _ = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
+                    log_probs = diffusinSA.cal_loss(batch, mode='test') # avg log probs per sentence
                     total_tokens += torch.numel(batch)
                     total_log_probs += log_probs*batch.size(0)
             if args.dataset=='text8': # text8 has 5M characters in dev and test set
@@ -144,13 +147,12 @@ def test(local_rank:int, args):
     store_batch_num = 1
     store_sample_path = args.checkpoint[:-3]+'.json'
     samples = {
-        'proposals':[],
-        'predictions':[],
         'samples':[]
     }
     beta_schedule = linear_beta_schedule if args.beta_schedule=='linear' else cosine_beta_schedule
     imnosing_model = noise_model(args.imnoise_method, args.vocab_size, device=local_rank)
-    diffusinSA = diffusion_SA(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
+    diffusion_cls = diffusion_SA_direct if hasattr(args, 'direct_diffusion') and args.direct_diffusion else diffusion_SA
+    diffusinSA = diffusion_cls(imnosing_model, denosing_model, timesteps=args.timesteps, beta_schedule=beta_schedule,
         use_cache=args.use_cache, dataset=train_dataloader.dataset)
     # validation
     if local_rank==0:
@@ -161,13 +163,11 @@ def test(local_rank:int, args):
             total_log_probs = 0
             batch_num = 0
             for batch, _ in tqdm(dev_dataloader):
-                log_probs, x_series_proposed, x_series_pred = diffusinSA.cal_loss(
+                log_probs = diffusinSA.cal_loss(
                     batch, mode='test', eval_sample_num=args.eval_sample_num) # avg log probs per sentence
                 total_tokens += torch.numel(batch)
                 total_log_probs += log_probs*batch.size(0)
                 if batch_num<store_batch_num:
-                    samples['proposals'].append(x_series_proposed.cpu().tolist())
-                    samples['predictions'].append(x_series_pred.cpu().tolist())
                     denoised_x_series_samples=diffusinSA.sample_x(batch.shape, greedy=args.greedy_sampling)
                     samples['samples'].append(denoised_x_series_samples.cpu().tolist())
                     batch_num +=1
@@ -186,31 +186,38 @@ if __name__=='__main__':
     parser.add_argument('--exp_dir', type=str)
     parser.add_argument('--cfg_path', type=str, default="model_config.json", help='config file path')
     # dataset
-    parser.add_argument('--dataset', type=str, default='text8')
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--seq_len', type=int, default=128)
-    parser.add_argument('--character_level', action="store_true")
-    parser.add_argument('--vocab_size', type=int, default=500)
+    dataset_group = parser.add_argument_group(title='Dataset options')
+    dataset_group.add_argument('--dataset', type=str, default='text8')
+    dataset_group.add_argument('--num_workers', type=int, default=4)
+    dataset_group.add_argument('--seq_len', type=int, default=128)
+    dataset_group.add_argument('--character_level', action="store_true")
+    dataset_group.add_argument('--vocab_size', type=int, default=500)
     # training
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--optimizer', type=str, default='adam')
-    parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--warmup_ratio', type=float, default=0.15)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--ngpu', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--init_eval', action="store_true")
-    parser.add_argument('--debugging', action="store_true", help="debugging mode")
+    training_group = parser.add_argument_group(title='Training options')
+    training_group.add_argument('--seed', type=int, default=0)
+    training_group.add_argument('--optimizer', type=str, default='adam')
+    training_group.add_argument('--lr', type=float, default=0.0001)
+    training_group.add_argument('--warmup_ratio', type=float, default=0.15)
+    training_group.add_argument('--epochs', type=int, default=10)
+    training_group.add_argument('--ngpu', type=int, default=1)
+    training_group.add_argument('--batch_size', type=int, default=128)
+    training_group.add_argument('--resume', type=str, help="resume checkpoint path")
+    training_group.add_argument('--init_eval', action="store_true")
+    training_group.add_argument('--debugging', action="store_true", help="debugging mode")
     # testing
-    parser.add_argument('--test', action="store_true")
-    parser.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
-    parser.add_argument('--greedy_sampling', action="store_true")
-    parser.add_argument('--eval_sample_num', type=int, default=100, help="sampling number for evaluating the log prob")
+    testing_group = parser.add_argument_group(title='Testing options')
+    testing_group.add_argument('--test', action="store_true")
+    testing_group.add_argument('--checkpoint', type=str, help="checkpoint path for testing")
+    testing_group.add_argument('--greedy_sampling', action="store_true")
+    testing_group.add_argument('--eval_sample_num', type=int, default=100, help="sampling number for evaluating the log prob")
     # diffusion SA
-    parser.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram', 'trigram', 'fourgram'], default='multinomial')
-    parser.add_argument('--timesteps', type=int, default=5)
-    parser.add_argument('--beta_schedule', type=str, default='linear')
-    parser.add_argument('--use_cache', action="store_true")
+    diffusion_group = parser.add_argument_group(title='Diffusion options')
+    diffusion_group.add_argument('--imnoise_method', type=str, choices=['multinomial', 'bigram', 'trigram', 'fourgram'], default='multinomial')
+    diffusion_group.add_argument('--timesteps', type=int, default=5)
+    diffusion_group.add_argument('--train_sample_steps', type=int, default=2)
+    diffusion_group.add_argument('--beta_schedule', type=str, default='linear')
+    diffusion_group.add_argument('--use_cache', action="store_true")
+    diffusion_group.add_argument('--direct_diffusion', action="store_true")
     args = parser.parse_args()
     if args.cfg_path is None:
         args.cfg_path = os.path.join(args.exp_dir, 'config.json')
@@ -226,5 +233,12 @@ if __name__=='__main__':
         print(args)
         mp.spawn(test, nprocs=1, args=(args,))
     else:
+        if hasattr(args, 'resume'):
+            cfg = json.load(open(args.cfg_path, 'r'))
+            cfg = cfg['others']
+            for key in ['exp_dir', 'cfg_path', 'resume', 'epochs']:
+                if key in cfg:
+                    cfg.pop(key)
+            args.__dict__.update(cfg)
         print(args)
         mp.spawn(train, nprocs=args.ngpu, args=(args,))
